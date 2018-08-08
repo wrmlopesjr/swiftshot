@@ -12,6 +12,19 @@ import simd
 import AVFoundation
 import os.signpost
 
+struct GameState {
+    var teamACatapults = 0
+    var teamBCatapults = 0
+
+    mutating func add(_ catapult: Catapult) {
+        switch catapult.team {
+        case .teamA: teamACatapults += 1
+        case .teamB: teamBCatapults += 1
+        default: break
+        }
+    }
+}
+
 protocol GameManagerDelegate: class {
     func manager(_ manager: GameManager, received: BoardSetupAction, from: Player)
     func manager(_ manager: GameManager, joiningPlayer player: Player)
@@ -21,6 +34,7 @@ protocol GameManagerDelegate: class {
     func managerDidStartGame(_ manager: GameManager)
     func managerDidWinGame(_ manager: GameManager)
     func manager(_ manager: GameManager, hasNetworkDelay: Bool)
+    func manager(_ manager: GameManager, updated gameState: GameState)
 }
 
 /// - Tag: GameManager
@@ -29,7 +43,7 @@ class GameManager: NSObject {
     // actions coming from the main thread/UI layer
     struct TouchEvent {
         var type: TouchType
-        var hit: GameRayCastHitInfo
+        var camera: Ray
     }
     
     // interactions with the scene must be on the main thread
@@ -55,14 +69,16 @@ class GameManager: NSObject {
     }
     // don't execute any code from SCNView renderer until this is true
     private(set) var isInitialized = false
-    
-    private var hasBeenWon: Bool = false
+
+    // progress of the game
+    private(set) var gameState = GameState()
+
     private var gamedefs: [String: Any]
     private var gameObjects = Set<GameObject>()      // keep track of all of our entities here
     private var gameCamera: GameCamera?
     private var gameLight: GameLight?
     
-    private let session: GameSession?
+    private let session: NetworkSession?
     private let sfxCoordinator: SFXCoordinator
     private let musicCoordinator: MusicCoordinator
     private let useWallClock: Bool
@@ -92,17 +108,7 @@ class GameManager: NSObject {
     let isNetworked: Bool
     let isServer: Bool
 
-    var teamANumCatapultsDisabled: Int {
-        catapultsLock.lock(); defer { catapultsLock.unlock() }
-        return catapults.filter { $0.teamID == .yellow && $0.disabled }.count
-    }
-    
-    var teamBNumCatapultsDisabled: Int {
-        catapultsLock.lock(); defer { catapultsLock.unlock() }
-        return catapults.filter { $0.teamID == .blue && $0.disabled }.count
-    }
-
-    init(sceneView: SCNView, level: GameLevel, session: GameSession?,
+    init(sceneView: SCNView, level: GameLevel, session: NetworkSession?,
          audioEnvironment: AVAudioEnvironmentNode, musicCoordinator: MusicCoordinator) {
         
         // make our own scene instead of using the incoming one
@@ -167,12 +173,13 @@ class GameManager: NSObject {
     }
 
     // MARK: - processing touches
-    func handleTouch(type: TouchType, hit: GameRayCastHitInfo) {
+    func handleTouch(_ type: TouchType) {
         guard !UserDefaults.standard.spectator else { return }
         touchEventsLock.lock(); defer { touchEventsLock.unlock() }
-        touchEvents.append(TouchEvent(type: type, hit: hit))
+        touchEvents.append(TouchEvent(type: type, camera: lastCameraInfo.ray))
     }
-    
+
+    var lastCameraInfo = CameraInfo(transform: .identity)
     func updateCamera(cameraInfo: CameraInfo) {
         if gameCamera == nil {
             // need the real render camera in order to set rendering state
@@ -187,29 +194,32 @@ class GameManager: NSObject {
         gameCamera?.transferProps()
 
         interactionManager.updateAll(cameraInfo: cameraInfo)
+        lastCameraInfo = cameraInfo
     }
 
     // MARK: - inbound from network
     private func process(command: GameCommand) {
-        os_signpost(type: .begin, log: .render_loop, name: .process_command, signpostID: .render_loop,
+        os_signpost(.begin, log: .render_loop, name: .process_command, signpostID: .render_loop,
                     "Action : %s", command.action.description)
         switch command.action {
         case .gameAction(let gameAction):
-            guard let player = command.player else { return }
-            interactionManager.handle(gameAction: gameAction, from: player)
+            if case let .physics(physicsData) = gameAction {
+                physicsSyncData.receive(packet: physicsData)
+            } else {
+                guard let player = command.player else { return }
+                interactionManager.handle(gameAction: gameAction, from: player)
+            }
         case .boardSetup(let boardAction):
             if let player = command.player {
                 delegate?.manager(self, received: boardAction, from: player)
             }
-        case .physics(let physicsData):
-            physicsSyncData.receive(packet: physicsData)
         case .startGameMusic(let timeData):
             // Start music at the correct place.
             if let player = command.player {
                 handleStartGameMusic(timeData, from: player)
             }
         }
-        os_signpost(type: .end, log: .render_loop, name: .process_command, signpostID: .render_loop,
+        os_signpost(.end, log: .render_loop, name: .process_command, signpostID: .render_loop,
                     "Action : %s", command.action.description)
     }
     
@@ -221,21 +231,14 @@ class GameManager: NSObject {
         processTouches()
         syncPhysics()
         
-        // removeFallenNodes only run once every 6 frames since it was found to be heavy on performance
-        if GameTime.frameCount % 6 == 0 {
-            removeFallenNodes(node: levelNode)
-        }
 #if !targetEnvironment(simulator)
         flagSimulation.update(levelNode)
 #endif
         
-        gameObjectManager.update()
+        gameObjectManager.update(deltaTime: timeDelta)
 
         for entity in gameObjects {
-            for component in entity.components where component is UpdatableComponent {
-                guard let updateableComponent = component as? UpdatableComponent else { continue }
-                updateableComponent.update(deltaTime: timeDelta, isServer: isServer)
-            }
+            entity.update(deltaTime: timeDelta)
         }
     }
 
@@ -304,7 +307,7 @@ class GameManager: NSObject {
     }
 
     private func process(_ touch: TouchEvent) {
-        interactionManager.handleTouch(type: touch.type, hit: touch.hit)
+        interactionManager.handleTouch(touch.type, camera: touch.camera)
     }
 
     func queueAction(gameAction: GameAction) {
@@ -313,17 +316,17 @@ class GameManager: NSObject {
     }
 
     private func syncPhysics() {
-        os_signpost(type: .begin, log: .render_loop, name: .physics_sync, signpostID: .render_loop,
+        os_signpost(.begin, log: .render_loop, name: .physics_sync, signpostID: .render_loop,
                     "Physics sync started")
         if isNetworked && physicsSyncData.isInitialized {
             if isServer {
                 let physicsData = physicsSyncData.generateData()
-                session?.send(action: .physics(physicsData))
+                session?.send(action: .gameAction(.physics(physicsData)))
             } else {
                 physicsSyncData.updateFromReceivedData()
             }
         }
-        os_signpost(type: .end, log: .render_loop, name: .physics_sync, signpostID: .render_loop,
+        os_signpost(.end, log: .render_loop, name: .physics_sync, signpostID: .render_loop,
                     "Physics sync finished")
         
     }
@@ -333,7 +336,7 @@ class GameManager: NSObject {
     }
 
     func startGameMusic(from interaction: Interaction) {
-        os_log(type: .debug, "3-2-1-GO music effect is done, time to start the game music")
+        os_log(.debug, "3-2-1-GO music effect is done, time to start the game music")
         startGameMusicEverywhere()
     }
 
@@ -440,12 +443,8 @@ class GameManager: NSObject {
     func initBehaviors() {
         // after everything is setup, add the behaviors if any
         for gameObject in gameObjects {
-            
-            // update constraints
-            for component in gameObject.components where component is PhysicsBehaviorComponent {
-                if let behaviorComponent = component as? PhysicsBehaviorComponent {
-                    behaviorComponent.initBehavior(levelRoot: levelNode, world: physicsWorld)
-                }
+            for component in gameObject.components(conformingTo: PhysicsBehaviorComponent.self) {
+                component.initBehavior(levelRoot: levelNode, world: physicsWorld)
             }
         }
     }
@@ -472,36 +471,6 @@ class GameManager: NSObject {
         // make a table object so we can attach audio component to it
         let tableObject = initGameObject(for: tableBoxNode)
         return tableObject
-    }
-    
-    // MARK: - Remove Out of Bound Nodes
-
-    // go through whole scene to remove objects that are far away
-    private func removeFallenNodes(node: SCNNode) {
-        // remove this node if we have to and make it invisible, but don't delete it and mess up the networking indices
-        if shouldRemove(node: node) {
-            node.removeFromParentNode()
-        } else {    // if we didn't move then check children
-            for child in node.childNodes {
-                removeFallenNodes(node: child)
-            }
-        }
-    }
-    
-    // logic to check if we should really remove a node or not
-    private func shouldRemove(node: SCNNode) -> Bool {
-        // Only remove dynamic node
-        guard node.physicsBody?.type == .dynamic else { return false }
-        
-        // check past min/max bounds
-        // the border was chosen experimentally to see what feels good
-        let minBounds = float3(-80.0, -10.0, -80.0) // -10.0 represents 1.0 meter high table
-        let maxBounds = float3(80.0, 1000.0, 80.0)
-        let position = node.presentation.simdWorldPosition
-        
-        // this is only checking position, but bounds could be offset or bigger
-        return min(position, minBounds) != minBounds ||
-               max(position, maxBounds) != maxBounds
     }
 
     // MARK: - Initialize Game Functions
@@ -539,7 +508,7 @@ class GameManager: NSObject {
         
         // only report team blocks
         if team != nil {
-            os_log(type: .debug, "configuring %s on team %s", name, team!)
+            os_log(.debug, "configuring %s on team %s", name, team!)
         }
         
         switch type {
@@ -559,9 +528,11 @@ class GameManager: NSObject {
             catapults.append(catapult)
 
             catapult.updateProps()
+            catapult.addComponent(RemoveWhenFallenComponent())
+            gameState.add(catapult)
             
-            physicsSyncData.addCatapultIgnoreNode(node: catapult.base, catapultID: catapult.catapultID)
-            
+            physicsSyncData.addObject(catapult)
+
         case "ShadowPlane":
             // don't add a game object, but don't visit it either
             return
@@ -617,31 +588,32 @@ class GameManager: NSObject {
                 
                 if let physicsNode = gameObject.physicsNode,
                     let physicsBody = physicsNode.physicsBody {
-                        physicsBody.angularDamping = 0.03
-                        physicsBody.damping = 0.03
-                        physicsBody.mass = 3
-                        physicsBody.linearSleepingThreshold = 1.0
-                        physicsBody.angularSleepingThreshold = 1.0
-                        physicsBody.collisionBitMask |= CollisionMask([.ball]).rawValue
+                    physicsBody.angularDamping = 0.03
+                    physicsBody.damping = 0.03
+                    physicsBody.mass = 3
+                    physicsBody.linearRestingThreshold = 1.0
+                    physicsBody.angularRestingThreshold = 1.0
+                    physicsBody.collisionBitMask |= CollisionMask([.ball]).rawValue
                     
-                        let density = gameObject.density
-                        if density > 0 {
-                            physicsNode.calculateMassFromDensity(name: name, density: density)
-                        }
-                        physicsBody.resetTransform()
-                        if physicsBody.allowsResting {
-                            physicsBody.setResting(true)
-                        }
+                    let density = gameObject.density
+                    if density > 0 {
+                        physicsNode.calculateMassFromDensity(name: name, density: density)
+                    }
+                    physicsBody.resetTransform()
+                    if physicsBody.allowsResting {
+                        physicsBody.setResting(true)
+                    }
                 }
             }
         
             // add to network synchronization code
-            if let physicsNode = gameObject.physicsNode {
-                physicsSyncData.addNode(node: physicsNode)
+            if gameObject.physicsNode != nil {
+                physicsSyncData.addObject(gameObject)
                 
                 if gameObject.isBlockObject {
                     gameObjectManager.addBlockObject(block: gameObject)
                 }
+                gameObject.addComponent(RemoveWhenFallenComponent())
             }
             
             if gameObject.categorize {
@@ -770,10 +742,6 @@ class GameManager: NSObject {
     func renderSpacePositionToSimulationSpace(pos: float3) -> float3 {
         return (renderToSimulationTransform * float4(pos, 1.0)).xyz
     }
-    
-    func renderSpaceDirectionToSimulationSpace(dir: float3) -> float3 {
-        return (renderToSimulationTransform * float4(dir, 0.0)).xyz
-    }
 
     func renderSpaceTransformToSimulationSpace(transform: float4x4) -> float4x4 {
         return renderToSimulationTransform * transform
@@ -784,7 +752,7 @@ class GameManager: NSObject {
     }
 
     func initGameObject(for node: SCNNode) -> GameObject {
-        let gameObject = GameObject(node: node, gamedefs: gamedefs)
+        let gameObject = GameObject(node: node, index: nil, gamedefs: gamedefs, alive: true, server: isServer)
         
         gameObjects.insert(gameObject)
         setupAudioComponent(for: gameObject)
@@ -796,19 +764,15 @@ class GameManager: NSObject {
         // let any collision handling components on nodeA respond to the collision with nodeB
 
         if let entity = nodeA.nearestParentGameObject() {
-            for component in entity.components where component is CollisionHandlerComponent {
-                if let handler = component as? CollisionHandlerComponent {
-                    handler.didCollision(manager: self, node: nodeA, otherNode: nodeB, pos: pos, impulse: impulse)
-                }
+            for collisionHandler in entity.components(conformingTo: CollisionHandlerComponent.self) {
+                collisionHandler.didCollision(manager: self, node: nodeA, otherNode: nodeB, pos: pos, impulse: impulse)
             }
         }
         
         // let any collision handling components in nodeB respond to the collision with nodeA
         if let entity = nodeB.nearestParentGameObject() {
-            for component in entity.components where component is CollisionHandlerComponent {
-                if let handler = component as? CollisionHandlerComponent {
-                    handler.didCollision(manager: self, node: nodeB, otherNode: nodeA, pos: pos, impulse: impulse)
-                }
+            for collisionHandler in entity.components(conformingTo: CollisionHandlerComponent.self) {
+                collisionHandler.didCollision(manager: self, node: nodeB, otherNode: nodeA, pos: pos, impulse: impulse)
             }
         }
         
@@ -894,7 +858,7 @@ class GameManager: NSObject {
             }
             let startWallTime = timeData.timestamps[0]
             let position = now - startWallTime
-            os_log(type: .debug, "handleStartGameMusic (either), playing music from start time %d", position)
+            os_log(.debug, "handleStartGameMusic (either), playing music from start time %d", position)
             musicCoordinator.playMusic(name: "music_gameplay", startTime: position)
         } else {
             if isServer {
@@ -954,8 +918,8 @@ class GameManager: NSObject {
     }
 }
 
-extension GameManager: GameSessionDelegate {
-    func gameSession(_ session: GameSession, received command: GameCommand) {
+extension GameManager: NetworkSessionDelegate {
+    func networkSession(_ session: NetworkSession, received command: GameCommand) {
         commandsLock.lock(); defer { commandsLock.unlock() }
         // Check if the action received is used to setup the board
         // If so, process it and don't wait for the next update cycle to unqueue the event
@@ -967,7 +931,7 @@ extension GameManager: GameSessionDelegate {
         }
     }
     
-    func gameSession(_ session: GameSession, joining player: Player) {
+    func networkSession(_ session: NetworkSession, joining player: Player) {
         if player == session.host {
             delegate?.manager(self, joiningHost: player)
         } else {
@@ -975,7 +939,7 @@ extension GameManager: GameSessionDelegate {
         }
     }
     
-    func gameSession(_ session: GameSession, leaving player: Player) {
+    func networkSession(_ session: NetworkSession, leaving player: Player) {
         if player == session.host {
             delegate?.manager(self, leavingHost: player)
         } else {
@@ -990,6 +954,10 @@ extension GameManager: CatapultDelegate {
             sfxCoordinator.playCatapultBreak(catapult: catapult, vortex: vortex)
         }
         gameObjectManager.addBlockObject(block: catapult)
+        gameState.teamACatapults = catapults.filter { $0.team == .teamA && !$0.disabled }.count
+        gameState.teamBCatapults = catapults.filter { $0.team == .teamB && !$0.disabled }.count
+        os_log(.info, "Sending new gameState %s", "\(gameState)")
+        delegate?.manager(self, updated: gameState)
     }
 
     func catapultDidBeginGrab(_ catapult: Catapult) {
@@ -1040,11 +1008,7 @@ extension GameManager: InteractionDelegate {
     func addNodeToLevel(_ node: SCNNode) {
         levelNode.addChildNode(node)
     }
-    
-    func addNodeToPhysicsSync(_ node: SCNNode) {
-        physicsSyncData.addNode(node: node)
-    }
-    
+
     func spawnProjectile() -> Projectile {
         let projectile = gameObjectPool.spawnProjectile()
         physicsSyncData.replaceProjectile(projectile)
@@ -1060,20 +1024,7 @@ extension GameManager: InteractionDelegate {
     }
     
     func gameObjectPoolCount() -> Int { return gameObjectPool.initialPoolCount }
-    
-    func addCatapultPhysicsIgnoreNodeToLevel(_ node: SCNNode, catapultID: Int) {
-        levelNode.addChildNode(node)
-        physicsSyncData.addCatapultIgnoreNode(node: node, catapultID: catapultID)
-    }
-    
-    func ignorePhysicsOnCatapult(_ catapultID: Int) {
-        physicsSyncData.ignoreDataForCatapult(catapultID: catapultID)
-    }
-    
-    func stopIgnoringPhysicsOnCatapult() {
-        physicsSyncData.stopIgnoringDataForCatapult()
-    }
-    
+
     func dispatchActionToServer(gameAction: GameAction) {
         if isServer {
             queueAction(gameAction: gameAction)

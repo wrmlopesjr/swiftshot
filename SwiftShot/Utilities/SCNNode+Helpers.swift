@@ -72,13 +72,13 @@ extension SCNNode {
         return findNodeWithGeometryHelper(node: self)
     }
     
-    var teamID: TeamID {
+    var team: Team {
         var parent = self.parent
         while let current = parent {
             if current.name == "_teamA" {
-                return .blue
+                return .teamA
             } else if current.name == "_teamB" {
-                return .yellow // red?
+                return .teamB
             }
             parent = current.parent
         }
@@ -212,7 +212,7 @@ extension SCNNode {
             fatalError("model \(modelFileName) has no child nodes")
         }
         if nodeRef.childNodes.count > 1 {
-            os_log(type: .error, "model %s should have a single root node", modelFileName)
+            os_log(.error, "model %s should have a single root node", modelFileName)
         }
         
         // walk down the scenegraph and update all children
