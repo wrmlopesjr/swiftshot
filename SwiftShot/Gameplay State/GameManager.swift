@@ -87,6 +87,8 @@ class GameManager: NSObject {
     private let interactionManager = InteractionManager()
     private let gameObjectManager = GameObjectManager()
     
+    private var vortex : VortexInteraction!
+    
     let currentPlayer = UserDefaults.standard.myself
 
     let isNetworked: Bool
@@ -141,6 +143,10 @@ class GameManager: NSObject {
         
         self.session?.delegate = self
         physicsWorld.contactDelegate = self   // get notified of collisions
+    }
+    
+    func reset(){
+        unload()
     }
     
     func unload() {
@@ -396,6 +402,16 @@ class GameManager: NSObject {
         let levelNodeTransform = float4x4(scale: level.normalizedScale)
         renderToSimulationTransform = levelNodeTransform.inverse * gameBoard.simdWorldTransform.inverse
     }
+    
+    func restart(){
+        GameObject.resetIndexCounter()
+        categories = [String: [GameObject]] ()
+        
+        initializeGameObjectPool()
+        
+        initializeLevel()
+        
+    }
 
     // Initializes all the objects and interactions for the game, and prepares
     // to process user input.
@@ -435,6 +451,12 @@ class GameManager: NSObject {
         // remove all audio players added to AVAudioEngine.
         sfxCoordinator.removeAllAudioSamplers()
         level.reset()
+    }
+    
+    func executeVortex(){
+        if let v = vortex {
+            v.activate()
+        }
     }
     
     func initBehaviors() {
@@ -732,7 +754,7 @@ class GameManager: NSObject {
         interactionManager.addInteraction(CatapultDisableInteraction(delegate: self))
         
         // Vortex
-        let vortex = VortexInteraction(delegate: self)
+        vortex = VortexInteraction(delegate: self)
         vortex.vortexActivationDelegate = catapultInteraction
         vortex.sfxCoordinator = sfxCoordinator
         vortex.musicCoordinator = musicCoordinator
@@ -1056,7 +1078,7 @@ extension GameManager: InteractionDelegate {
     }
     
     func createProjectile() -> Projectile {
-        return gameObjectPool.createProjectile(for: .cannonball, index: nil)
+        return gameObjectPool.createProjectile(for: .chicken, index: nil)
     }
     
     func gameObjectPoolCount() -> Int { return gameObjectPool.initialPoolCount }

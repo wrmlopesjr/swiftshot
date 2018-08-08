@@ -51,6 +51,7 @@ class GameViewController: UIViewController {
 
     @IBOutlet var sceneView: ARSCNView!
     private let audioListenerNode = SCNNode()
+    private var session: GameSession? = nil
 
     @IBOutlet weak var activityIndicator: UIActivityIndicatorView!
     @IBOutlet weak var overlayView: UIView!
@@ -58,6 +59,8 @@ class GameViewController: UIViewController {
 
     @IBOutlet weak var exitGameButton: UIButton!
     @IBOutlet weak var settingsButton: UIButton!
+    @IBOutlet weak var clearGameButton: UIButton!
+    @IBOutlet weak var resetGameButton: UIButton!
     
     // Maps UI
     @IBOutlet weak var saveButton: UIButton!
@@ -255,6 +258,7 @@ class GameViewController: UIViewController {
 
     // MARK: - Configuration
     func configureView() {
+        
         dispatchPrecondition(condition: .onQueue(DispatchQueue.main))
 
         var debugOptions: SCNDebugOptions = []
@@ -293,6 +297,14 @@ class GameViewController: UIViewController {
             activityIndicator.startAnimating()
         } else {
             activityIndicator.stopAnimating()
+        }
+        
+        if !UserDefaults.standard.spectator {
+           clearGameButton.isHidden = true
+        }
+        
+        if !UserDefaults.standard.spectator {
+            resetGameButton.isHidden = false
         }
      
         if !UserDefaults.standard.showSettingsInGame {
@@ -361,11 +373,23 @@ class GameViewController: UIViewController {
         os_log(type: .info, "configured AR session")
         sceneView.session.run(configuration, options: options)
     }
+    
+    @IBAction func clearPressed(_ sender: UIButton) {
+        showAlert(title: "Clear", message: "Clearing")
+        gameManager?.executeVortex()
+    }
+    
+    @IBAction func resetPressed(_ sender: UIButton) {
+        showAlert(title: "Reset", message: "Reseting")
+        //exitGame(resetFlag: true)
+        gameManager?.reset()
+        
+    }
 
     // MARK: - UI Buttons
     @IBAction func exitGamePressed(_ sender: UIButton) {
         let leaveAction = UIAlertAction(title: NSLocalizedString("Leave", comment: ""), style: .cancel) { _ in
-            self.exitGame()
+            self.exitGame(resetFlag: false)
             // start looking for beacons again
             self.proximityManager.start()
         }
@@ -382,11 +406,15 @@ class GameViewController: UIViewController {
         showAlert(title: localizedTitle, message: localizedMessage, actions: actions)
     }
     
-    func exitGame() {
+    func exitGame(resetFlag: Bool) {
         backButtonBeep.play()
         gameManager?.releaseLevel()
         gameManager = nil
-        showOverlay()
+        
+        if !resetFlag {
+            showOverlay()
+        }
+        
         
         // Cleanup the current loaded map
         targetWorldMap = nil
@@ -901,20 +929,28 @@ extension GameViewController: OverlayViewControllerDelegate {
     func overlayViewControllerSelectedSettings(_ overlayViewController: UIViewController) {
         performSegue(withIdentifier: GameSegue.showSettings.rawValue, sender: self)
     }
+    
+    func performReset(game: GameSession?){
+        createGameManager(for: game)
+        session = game
+    }
 
     func overlayViewController(_ overlayViewController: UIViewController, didPressStartSoloGameButton: UIButton) {
         hideOverlay()
         createGameManager(for: nil)
+        session = nil
     }
     
     func overlayViewController(_ overlayViewController: UIViewController, didStart game: GameSession) {
         hideOverlay()
         createGameManager(for: game)
+        session = game
     }
     
     func overlayViewController(_ overlayViewController: UIViewController, didSelect game: GameSession) {
         hideOverlay()
         createGameManager(for: game)
+        session = game
     }
 }
 

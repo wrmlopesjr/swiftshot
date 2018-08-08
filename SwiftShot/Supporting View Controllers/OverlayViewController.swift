@@ -14,6 +14,7 @@ protocol OverlayViewControllerDelegate: class {
     func overlayViewController(_ overlayViewController: UIViewController, didSelect game: GameSession)
     func overlayViewController(_ overlayViewController: UIViewController, didStart game: GameSession)
     func overlayViewControllerSelectedSettings(_ overlayViewController: UIViewController)
+    func performReset(game: GameSession?)
 }
 
 enum GameSegue: String {

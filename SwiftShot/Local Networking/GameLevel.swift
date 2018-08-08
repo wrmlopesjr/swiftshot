@@ -96,7 +96,7 @@ class GameLevel {
     
     static let gateway = GameLevel(key: .gateway, name: "Gateway", identifier: "level_gateway", targetSize: CGSize(width: 1.5, height: 2.7))
     static let bridge = GameLevel(key: .bridge, name: "Bridge", identifier: "level_bridge", targetSize: CGSize(width: 1.5, height: 2.7))
-    static let farm = GameLevel(key: .farm, name: "Farm", identifier: "level_farm", targetSize: CGSize(width: 1.5, height: 2.7))
+    static let farm = GameLevel(key: .farm, name: "Farm", identifier: "level_farm", targetSize: CGSize(width: 2, height: 2))
     static let archFort = GameLevel(key: .archFort, name: "Fort", identifier: "level_archFort", targetSize: CGSize(width: 1.5, height: 2.7))
     static let towers = GameLevel(key: .towers, name: "Towers", identifier: "level_towers", targetSize: CGSize(width: 1.5, height: 2.7))
     
@@ -120,6 +120,10 @@ class GameLevel {
     
     func reset() {
         placed = false
+        levelNodeClone = nil
+    }
+    
+    func softReset() {
         levelNodeClone = nil
     }
     

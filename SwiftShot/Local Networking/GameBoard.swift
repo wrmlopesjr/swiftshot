@@ -38,7 +38,8 @@ class GameBoard: SCNNode {
     /// The level's preferred size.
     /// This is used both to set the aspect ratio and to determine
     /// the default size.
-    var preferredSize: CGSize = CGSize(width: 1.5, height: 2.7) {
+    //var preferredSize: CGSize = CGSize(width: 1.5, height: 2.7) {
+    var preferredSize: CGSize = CGSize(width: 3, height: 3) {
         didSet {
             updateBorderAspectRatio()
         }
