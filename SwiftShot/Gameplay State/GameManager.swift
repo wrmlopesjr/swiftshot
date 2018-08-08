@@ -146,7 +146,7 @@ class GameManager: NSObject {
     }
     
     func reset(){
-        unload()
+        restart()
     }
     
     func unload() {
@@ -404,13 +404,72 @@ class GameManager: NSObject {
     }
     
     func restart(){
-        GameObject.resetIndexCounter()
-        categories = [String: [GameObject]] ()
         
-        initializeGameObjectPool()
+        catapultsLock.lock(); defer { catapultsLock.unlock() }
         
-        initializeLevel()
+        gameObjects.removeAll()
         
+        enumerateHierarchyRestart(levelNode)
+        
+    }
+    
+    private func enumerateHierarchyRestart(_ node: SCNNode, teamName: String? = nil) {
+        // If the node has no name or a name does not contain
+        // a type identifier, we look at its children.
+        
+        guard let name = node.name, let type = node.typeIdentifier else {
+            let extractedName = self.teamName(for: node)
+            let newTeamName = extractedName ?? teamName
+            for child in node.childNodes {
+                enumerateHierarchyRestart(child, teamName: newTeamName)
+            }
+            return
+        }
+        
+        reconfigure(node: node, name: name, type: type, team: teamName)
+    }
+    
+    private func reconfigure(node: SCNNode, name: String, type: String, team: String?) {
+        // For nodes with types, we create at most one gameObject, configured
+        // based on the node type.
+        
+        // only report team blocks
+        if team != nil {
+            os_log(type: .debug, "configuring %s on team %s", name, team!)
+        }
+        
+        node.isHidden = false
+        
+        switch type {
+            
+        default:
+            
+            let gameObject = initGameObject(for: node)
+            
+            // hardcoded overrides for physics happens here
+            if !gameObject.usePredefinedPhysics {
+                // Constrain the angularVelocity until first ball fires.
+                // This is done to stabilize the level.
+                gameObject.physicsNode?.physicsBody?.simdAngularVelocityFactor = float3(0.0, 0.0, 0.0)
+                
+                if let physicsNode = gameObject.physicsNode,
+                    let physicsBody = physicsNode.physicsBody {
+                    physicsBody.angularDamping = 0.03
+                    physicsBody.damping = 0.03
+                    physicsBody.simdVelocity = float3(0.0, 0.0, 0.0)
+//                    physicsBody.simdVelocityFactor = float3(0.0, 0.0, 0.0)
+                    physicsBody.simdAngularVelocity = float4(0.0, 0.0, 0.0, 0.0)
+//                    physicsBody.simdAngularVelocityFactor = float3(0.0, 0.0, 0.0)
+                    physicsBody.linearSleepingThreshold = 1.0
+                    physicsBody.angularSleepingThreshold = 1.0
+//                    physicsBody.collisionBitMask |= CollisionMask([.ball]).rawValue
+
+                    physicsBody.resetTransform()
+
+                }
+            }
+            
+        }
     }
 
     // Initializes all the objects and interactions for the game, and prepares
@@ -502,7 +561,8 @@ class GameManager: NSObject {
     private func removeFallenNodes(node: SCNNode) {
         // remove this node if we have to and make it invisible, but don't delete it and mess up the networking indices
         if shouldRemove(node: node) {
-            node.removeFromParentNode()
+            //node.removeFromParentNode()
+            //node.isHidden = true
         } else {    // if we didn't move then check children
             for child in node.childNodes {
                 removeFallenNodes(node: child)
@@ -522,8 +582,10 @@ class GameManager: NSObject {
         let position = node.presentation.simdWorldPosition
         
         // this is only checking position, but bounds could be offset or bigger
-        return min(position, minBounds) != minBounds ||
+        let shouldRemovePos = min(position, minBounds) != minBounds ||
                max(position, maxBounds) != maxBounds
+        
+        return shouldRemovePos
     }
 
     // MARK: - Initialize Game Functions
@@ -807,7 +869,6 @@ class GameManager: NSObject {
 
     func initGameObject(for node: SCNNode) -> GameObject {
         let gameObject = GameObject(node: node, gamedefs: gamedefs)
-        
         gameObjects.insert(gameObject)
         setupAudioComponent(for: gameObject)
         return gameObject
